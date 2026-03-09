@@ -11,6 +11,8 @@ const PORT = 3456;
 
 // ===== Express Server =====
 async function startServer() {
+  // パッケージ化時はユーザーデータ領域に録画を保存
+  process.env.REC_DATA_DIR = app.getPath('userData');
   const mod = await import('./server.js');
   await mod.startServer();
 }

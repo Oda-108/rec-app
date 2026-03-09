@@ -35,7 +35,9 @@
       "assets/**/*",
       "node_modules/**/*"
     ],
-    "extraResources": [],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
     "mac": {
       "category": "public.app-category.video",
       "icon": "assets/icon.icns",

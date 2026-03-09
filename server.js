@@ -7,9 +7,16 @@ import { execFile } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RECORDINGS_DIR = path.join(__dirname, 'recordings');
+
+// パッケージ化されたアプリではユーザーデータ領域を使う
+const RECORDINGS_DIR = process.env.REC_DATA_DIR
+  ? path.join(process.env.REC_DATA_DIR, 'recordings')
+  : path.join(__dirname, 'recordings');
 const META_FILE = path.join(RECORDINGS_DIR, 'meta.json');
 const PORT = 3456;
+
+// ffmpeg: asar展開パスに対応
+const ffmpeg = ffmpegPath.replace('app.asar', 'app.asar.unpacked');
 
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 
@@ -26,7 +33,7 @@ function saveMeta(data) {
  */
 function convertToMp4(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    execFile(ffmpegPath, [
+    execFile(ffmpeg, [
       '-i', inputPath,
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
@@ -235,7 +242,7 @@ app.get('/api/recordings/:id/thumbnail', (req, res) => {
 
   if (!fs.existsSync(srcPath)) return res.status(404).send('File not found');
 
-  execFile(ffmpegPath, [
+  execFile(ffmpeg, [
     '-i', srcPath,
     '-vframes', '1',
     '-vf', 'scale=320:-1',
