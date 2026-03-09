@@ -1,0 +1,74 @@
+{
+  "name": "rec-app",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server.js",
+    "dev": "electron . --dev",
+    "build": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:all": "electron-builder --mac --win"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ffmpeg-static": "^5.3.0",
+    "multer": "^2.1.0"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.rec.screen-recorder",
+    "productName": "Rec",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "server.js",
+      "public/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [],
+    "mac": {
+      "category": "public.app-category.video",
+      "icon": "assets/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Rec",
+      "iconSize": 80,
+      "contents": [
+        {
+          "x": 170,
+          "y": 200
+        },
+        {
+          "x": 430,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.iconset/icon_256x256.png",
+      "target": [
+        "nsis"
+      ]
+    }
+  }
+}
