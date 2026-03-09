@@ -1,3 +1,16 @@
+// ===== User ID =====
+const urlParams = new URLSearchParams(window.location.search);
+const USER_ID = urlParams.get('user') || '';
+
+// 全fetch呼び出しにユーザーIDヘッダーを付与
+const _originalFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+  if (USER_ID && typeof url === 'string' && url.startsWith('/api/')) {
+    options.headers = { ...(options.headers || {}), 'X-User-Id': USER_ID };
+  }
+  return _originalFetch.call(this, url, options);
+};
+
 // ===== Toast System =====
 function showToast(message, type = 'info') {
   const container = document.getElementById('toastContainer');

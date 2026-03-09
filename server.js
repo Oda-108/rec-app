@@ -8,24 +8,45 @@ import ffmpegPath from 'ffmpeg-static';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// パッケージ化されたアプリではユーザーデータ領域を使う
-const RECORDINGS_DIR = process.env.REC_DATA_DIR
-  ? path.join(process.env.REC_DATA_DIR, 'recordings')
-  : path.join(__dirname, 'recordings');
-const META_FILE = path.join(RECORDINGS_DIR, 'meta.json');
-const PORT = 3456;
+const BASE_DATA_DIR = process.env.REC_DATA_DIR || path.join(__dirname, 'recordings');
+const PORT = process.env.PORT || 3456;
 
 // ffmpeg: asar展開パスに対応
 const ffmpeg = ffmpegPath.replace('app.asar', 'app.asar.unpacked');
 
-if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+if (!fs.existsSync(BASE_DATA_DIR)) fs.mkdirSync(BASE_DATA_DIR, { recursive: true });
 
-function loadMeta() {
-  if (!fs.existsSync(META_FILE)) return [];
-  return JSON.parse(fs.readFileSync(META_FILE, 'utf-8'));
+// ===== Per-user helpers =====
+function validateUserId(id) {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(id);
 }
-function saveMeta(data) {
-  fs.writeFileSync(META_FILE, JSON.stringify(data, null, 2));
+
+function getUserDir(userId) {
+  if (!userId) return BASE_DATA_DIR;
+  const dir = path.join(BASE_DATA_DIR, userId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function loadMeta(userId) {
+  const metaFile = path.join(getUserDir(userId), 'meta.json');
+  if (!fs.existsSync(metaFile)) return [];
+  return JSON.parse(fs.readFileSync(metaFile, 'utf-8'));
+}
+
+function saveMeta(userId, data) {
+  const metaFile = path.join(getUserDir(userId), 'meta.json');
+  fs.writeFileSync(metaFile, JSON.stringify(data, null, 2));
+}
+
+// ===== Middleware: extract userId =====
+function extractUser(req, res, next) {
+  const userId = req.headers['x-user-id'] || null;
+  if (userId && !validateUserId(userId)) {
+    return res.status(400).json({ error: 'Invalid user ID' });
+  }
+  req.userId = userId;
+  next();
 }
 
 /**
@@ -54,10 +75,10 @@ function convertToMp4(inputPath, outputPath) {
   });
 }
 
-// Multer: webmとして保存
+// Multer: per-user destination
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, RECORDINGS_DIR),
-  filename: (_req, file, cb) => {
+  destination: (req, _file, cb) => cb(null, getUserDir(req.userId)),
+  filename: (_req, _file, cb) => {
     const id = `rec_${Date.now()}`;
     cb(null, `${id}.webm`);
   },
@@ -66,6 +87,7 @@ const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
 
 const app = express();
 app.use(express.json());
+app.use(extractUser);
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
   maxAge: 0,
@@ -73,14 +95,14 @@ app.use(express.static(path.join(__dirname, 'public'), {
 }));
 
 // 録画一覧
-app.get('/api/recordings', (_req, res) => {
-  const meta = loadMeta();
+app.get('/api/recordings', (req, res) => {
+  const meta = loadMeta(req.userId);
   res.json(meta.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
 });
 
 // 録画詳細
 app.get('/api/recordings/:id', (req, res) => {
-  const meta = loadMeta();
+  const meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
   res.json(rec);
@@ -88,7 +110,7 @@ app.get('/api/recordings/:id', (req, res) => {
 
 // 変換ステータス
 app.get('/api/recordings/:id/status', (req, res) => {
-  const meta = loadMeta();
+  const meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
   res.json({ converting: rec.converting || false, filename: rec.filename });
@@ -98,13 +120,13 @@ app.get('/api/recordings/:id/status', (req, res) => {
 app.post('/api/recordings', upload.single('video'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No video file' });
 
+  const userDir = getUserDir(req.userId);
   const webmPath = req.file.path;
   const id = path.basename(req.file.filename, '.webm');
   const title = req.body.title || '無題の録画';
   const duration = parseFloat(req.body.duration) || 0;
   const stat = fs.statSync(webmPath);
 
-  // まずwebmで即座に保存（レスポンス返す）
   const record = {
     id,
     title,
@@ -115,85 +137,83 @@ app.post('/api/recordings', upload.single('video'), (req, res) => {
     converting: true,
   };
 
-  const meta = loadMeta();
+  const meta = loadMeta(req.userId);
   meta.push(record);
-  saveMeta(meta);
+  saveMeta(req.userId, meta);
 
-  console.log(`Saved: ${req.file.filename} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
+  console.log(`Saved: ${req.file.filename} (${(stat.size / 1024 / 1024).toFixed(1)} MB) [user: ${req.userId || 'local'}]`);
   res.json(record);
 
   // バックグラウンドでmp4変換
   const mp4Filename = `${id}.mp4`;
-  const mp4Path = path.join(RECORDINGS_DIR, mp4Filename);
+  const mp4Path = path.join(userDir, mp4Filename);
+  const userId = req.userId;
 
   console.log(`Converting ${id}.webm → ${id}.mp4 (background)...`);
   convertToMp4(webmPath, mp4Path)
     .then(() => {
       const mp4Stat = fs.statSync(mp4Path);
-      // webm削除
       try { fs.unlinkSync(webmPath); } catch {}
-      // meta更新
-      const meta = loadMeta();
+      const meta = loadMeta(userId);
       const rec = meta.find(r => r.id === id);
       if (rec) {
         rec.filename = mp4Filename;
         rec.size = mp4Stat.size;
         rec.converting = false;
-        saveMeta(meta);
+        saveMeta(userId, meta);
       }
       console.log(`Converted: ${mp4Filename} (${(mp4Stat.size / 1024 / 1024).toFixed(1)} MB)`);
     })
     .catch((e) => {
       console.error(`Conversion failed for ${id}:`, e.message);
-      // 変換失敗してもwebmは残る。convertingフラグだけ外す
-      const meta = loadMeta();
+      const meta = loadMeta(userId);
       const rec = meta.find(r => r.id === id);
       if (rec) {
         rec.converting = false;
-        saveMeta(meta);
+        saveMeta(userId, meta);
       }
     });
 });
 
 // タイトル更新
 app.patch('/api/recordings/:id', (req, res) => {
-  const meta = loadMeta();
+  const meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
   if (req.body.title) rec.title = req.body.title;
-  saveMeta(meta);
+  saveMeta(req.userId, meta);
   res.json(rec);
 });
 
 // 録画削除
 app.delete('/api/recordings/:id', (req, res) => {
-  let meta = loadMeta();
+  const userDir = getUserDir(req.userId);
+  let meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
 
-  // mp4, webm, サムネイルを削除
   const baseName = rec.id;
   for (const ext of ['.mp4', '.webm', '_thumb.jpg']) {
-    const p = path.join(RECORDINGS_DIR, baseName + ext);
+    const p = path.join(userDir, baseName + ext);
     if (fs.existsSync(p)) fs.unlinkSync(p);
   }
 
   meta = meta.filter(r => r.id !== req.params.id);
-  saveMeta(meta);
+  saveMeta(req.userId, meta);
   res.json({ success: true });
 });
 
 // 動画ファイル配信（Range対応）
 app.get('/api/recordings/:id/video', (req, res) => {
-  const meta = loadMeta();
+  const userDir = getUserDir(req.userId);
+  const meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
 
-  // mp4があればmp4優先、なければwebm
-  let filePath = path.join(RECORDINGS_DIR, rec.filename);
+  let filePath = path.join(userDir, rec.filename);
   let contentType = rec.filename.endsWith('.mp4') ? 'video/mp4' : 'video/webm';
 
-  const mp4Path = path.join(RECORDINGS_DIR, rec.id + '.mp4');
+  const mp4Path = path.join(userDir, rec.id + '.mp4');
   if (fs.existsSync(mp4Path)) {
     filePath = mp4Path;
     contentType = 'video/mp4';
@@ -226,18 +246,19 @@ app.get('/api/recordings/:id/video', (req, res) => {
 
 // サムネイル生成
 app.get('/api/recordings/:id/thumbnail', (req, res) => {
-  const meta = loadMeta();
+  const userDir = getUserDir(req.userId);
+  const meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
 
-  const thumbPath = path.join(RECORDINGS_DIR, `${rec.id}_thumb.jpg`);
+  const thumbPath = path.join(userDir, `${rec.id}_thumb.jpg`);
 
   if (fs.existsSync(thumbPath)) {
     return res.sendFile(thumbPath);
   }
 
-  const mp4Path = path.join(RECORDINGS_DIR, rec.id + '.mp4');
-  const webmPath = path.join(RECORDINGS_DIR, rec.id + '.webm');
+  const mp4Path = path.join(userDir, rec.id + '.mp4');
+  const webmPath = path.join(userDir, rec.id + '.webm');
   const srcPath = fs.existsSync(mp4Path) ? mp4Path : webmPath;
 
   if (!fs.existsSync(srcPath)) return res.status(404).send('File not found');
@@ -259,13 +280,13 @@ app.get('/api/recordings/:id/thumbnail', (req, res) => {
 
 // ダウンロード（mp4優先）
 app.get('/api/recordings/:id/download', (req, res) => {
-  const meta = loadMeta();
+  const userDir = getUserDir(req.userId);
+  const meta = loadMeta(req.userId);
   const rec = meta.find(r => r.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
 
-  // mp4優先
-  const mp4Path = path.join(RECORDINGS_DIR, rec.id + '.mp4');
-  const webmPath = path.join(RECORDINGS_DIR, rec.id + '.webm');
+  const mp4Path = path.join(userDir, rec.id + '.mp4');
+  const webmPath = path.join(userDir, rec.id + '.webm');
 
   if (fs.existsSync(mp4Path)) {
     res.download(mp4Path, `${rec.title}.mp4`);
@@ -289,9 +310,9 @@ function startServer() {
   });
 }
 
-// 直接実行時は自動起動（node server.js）
-const isDirectRun = process.argv[1] && process.argv[1].endsWith('server.js');
-if (isDirectRun) {
+// 直接実行時 or Render等のクラウド実行時は自動起動
+const isElectron = process.versions && process.versions.electron;
+if (!isElectron) {
   startServer();
 }
 
